@@ -1,3 +1,12 @@
 name = "kinde-gated-openai-responses-api"
 main = "index.ts"
 compatibility_date = "2023-10-30"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+
+[observability.analytics_engine]
+enabled = true
