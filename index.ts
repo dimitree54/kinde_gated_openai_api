@@ -2,6 +2,7 @@ export interface Env {
   KINDE_DOMAIN: string;           // e.g. "yourbiz.kinde.com"
   OPENAI_API_KEY: string;         // server-side only
   ALLOWED_ORIGIN?: string;        // e.g. "https://yourapp.com"
+  DEV_PRO_TOKEN?: string;         // development bypass token
 }
 
 const cors = (origin: string | null, env: Env) => ({
@@ -32,6 +33,47 @@ function hasEntitlement(payload: any, key: string): boolean {
   return false;
 }
 
+async function validateKindeAccess(userAccessToken: string, env: Env): Promise<{ success: boolean; error?: Response }> {
+  const issuer = env.KINDE_DOMAIN.startsWith("http")
+    ? env.KINDE_DOMAIN
+    : `https://${env.KINDE_DOMAIN}`;
+  const entitlementsUrl = `${issuer}/account_api/v1/entitlements`;
+
+  const entRes = await fetch(entitlementsUrl, {
+    headers: { Authorization: `Bearer ${userAccessToken}` },
+    cf: { cacheTtl: 0 } as any,
+  });
+  const entJson = await entRes.json().catch(() => ({}));
+  if (!entRes.ok) {
+    return {
+      success: false,
+      error: new Response(JSON.stringify({
+        message: `Error: Kinde Account API returned ${entRes.status}`,
+        details: entJson,
+      }), {
+        status: entRes.status,
+        headers: cors(null, env),
+      })
+    };
+  }
+
+  const REQUIRED_FEATURE = "ai_preprocessing";
+  if (!hasEntitlement(entJson, REQUIRED_FEATURE)) {
+    return {
+      success: false,
+      error: new Response(JSON.stringify({
+        success: false,
+        message: `Error: Permission '${REQUIRED_FEATURE}' not found.`,
+      }), {
+        status: 403,
+        headers: cors(null, env),
+      })
+    };
+  }
+
+  return { success: true };
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") return handleOptions(request, env);
@@ -42,7 +84,7 @@ export default {
       });
     }
 
-    // 1) Validate Kinde user token
+    // 1) Validate user token (with DEV_PRO_TOKEN bypass)
     const authHeader = request.headers.get("Authorization");
     if (!authHeader?.startsWith("Bearer ")) {
       return new Response(JSON.stringify({ message: "Error: Missing or invalid Authorization header." }), {
@@ -52,36 +94,15 @@ export default {
     }
     const userAccessToken = authHeader.split(" ")[1];
 
-    const issuer = env.KINDE_DOMAIN.startsWith("http")
-      ? env.KINDE_DOMAIN
-      : `https://${env.KINDE_DOMAIN}`;
-    const entitlementsUrl = `${issuer}/account_api/v1/entitlements`;
-
-    const entRes = await fetch(entitlementsUrl, {
-      headers: { Authorization: `Bearer ${userAccessToken}` },
-      cf: { cacheTtl: 0 } as any,
-    });
-    const entJson = await entRes.json().catch(() => ({}));
-    if (!entRes.ok) {
-      return new Response(JSON.stringify({
-        message: `Error: Kinde Account API returned ${entRes.status}`,
-        details: entJson,
-      }), {
-        status: entRes.status,
-        headers: cors(request.headers.get("Origin"), env),
-      });
-    }
-
-    // 2) Gate on feature entitlement
-    const REQUIRED_FEATURE = "ai_preprocessing";
-    if (!hasEntitlement(entJson, REQUIRED_FEATURE)) {
-      return new Response(JSON.stringify({
-        success: false,
-        message: `Error: Permission '${REQUIRED_FEATURE}' not found.`,
-      }), {
-        status: 403,
-        headers: cors(request.headers.get("Origin"), env),
-      });
+    // Check for development bypass token
+    if (env.DEV_PRO_TOKEN && userAccessToken === env.DEV_PRO_TOKEN) {
+      // Skip Kinde validation for development token
+    } else {
+      // Normal Kinde validation
+      const validation = await validateKindeAccess(userAccessToken, env);
+      if (!validation.success) {
+        return validation.error!;
+      }
     }
 
     // 3) Forward POST body to OpenAI with streaming enabled
