@@ -94,21 +94,10 @@ export default {
     }
     const userAccessToken = authHeader.split(" ")[1];
 
-    // Check for development bypass token
-    if (env.DEV_PRO_TOKEN && userAccessToken === env.DEV_PRO_TOKEN) {
-      // Skip Kinde validation for development token
-    } else {
-      // Normal Kinde validation
-      const validation = await validateKindeAccess(userAccessToken, env);
-      if (!validation.success) {
-        return validation.error!;
-      }
-    }
-
-    // 3) Forward POST body to OpenAI with streaming enabled
+    // Start OpenAI request immediately (in parallel with validation)
     const body = await request.text();
 
-    const upstream = await fetch("https://api.openai.com/v1/chat/completions", {
+    const upstreamPromise = fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
@@ -118,6 +107,23 @@ export default {
       body: body,
     });
 
+    // Validate access while OpenAI request is in flight
+    let validationPromise: Promise<{ success: boolean; error?: Response }>;
+    if (env.DEV_PRO_TOKEN && userAccessToken === env.DEV_PRO_TOKEN) {
+      validationPromise = Promise.resolve({ success: true });
+    } else {
+      validationPromise = validateKindeAccess(userAccessToken, env);
+    }
+
+    // Wait for both to complete
+    const [upstream, validation] = await Promise.all([upstreamPromise, validationPromise]);
+
+    // If validation failed, upstream is automatically cancelled by returning early
+    if (!validation.success) {
+      return validation.error!;
+    }
+
+    // Validation succeeded, stream OpenAI response to user
     const headers = new Headers(upstream.headers);
     headers.set("Content-Type", "text/event-stream; charset=utf-8");
     headers.set("Cache-Control", "no-store");
